@@ -59,7 +59,12 @@ OPENRGB_HOST=127.0.0.1 python3 rgb_server.py
 
 Open `http://localhost:7777` and start controlling your lights.
 
-Want to use it from your phone? By default the UI only listens on localhost. Read [SPEC.md §13 Security](SPEC.md#13-security) for the safe ways to open it to your home network — and **never expose ports 7777 or 6742 to the internet**.
+Want to use it from your phone? By default the UI only listens on localhost. Read [SPEC.md §13 Security](SPEC.md#13-security) for the safe ways to open it to your home network — and **never expose ports 7777 or 6742 to the internet**. In short:
+
+- **Any mode:** best option is a reverse proxy with a login in front of `127.0.0.1:7777`.
+- **Docker:** set `WEB_BIND` to the machine's LAN address, on a trusted network only. Note that **ufw/firewalld do not filter Docker-published ports** (Docker's iptables rules bypass them) — use the `DOCKER-USER` chain rules in the spec if you need a firewall.
+- **Native:** bind to the LAN and restrict port 7777 to your LAN subnet with ufw (or Windows Firewall).
+- **WSL2:** ports are only forwarded to Windows localhost; LAN access needs `netsh interface portproxy` + a Windows firewall rule, or mirrored networking + a Hyper-V firewall rule (see SPEC.md §14).
 
 ## How It Works
 

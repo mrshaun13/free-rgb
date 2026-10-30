@@ -91,9 +91,11 @@ sudo modprobe i2c-i801
 sudo modprobe i2c-dev
 sudo modprobe i2c-piix4
 
-# Persist across reboots (use i2c-piix4 instead of i2c-i801 on AMD)
-echo "i2c-dev"  | sudo tee /etc/modules-load.d/i2c-dev.conf
-echo "i2c-i801" | sudo tee /etc/modules-load.d/i2c-smbus.conf
+# Persist across reboots — always:
+echo "i2c-dev"   | sudo tee /etc/modules-load.d/i2c-dev.conf
+# ...plus ONE of these, matching your chipset:
+echo "i2c-i801"  | sudo tee /etc/modules-load.d/i2c-smbus.conf   # Intel
+echo "i2c-piix4" | sudo tee /etc/modules-load.d/i2c-smbus.conf   # AMD
 ```
 
 Some AMD boards also need the kernel parameter `acpi_enforce_resources=lax` for OpenRGB to access the SMBus; follow the OpenRGB docs if your controller is not detected. USB-based RGB controllers do not need these modules.
@@ -306,7 +308,7 @@ networks:
 **Important notes:**
 - The `openrgb` container **must** be privileged for I2C/SMBus hardware access. The host must have the kernel modules from Section 1, Step 3 loaded.
 - Port 6742 is **not published**: both containers share `rgb-net`, so `rgb-lights` reaches `openrgb:6742` directly. The OpenRGB SDK has no authentication — publishing it would let anything that can reach the port control the lights.
-- The web UI is published on `127.0.0.1` by default. To use it from a phone on your LAN, set `WEB_BIND` in `.env` to the machine's LAN address (or `0.0.0.0` behind a host firewall) — read Section 13 first.
+- The web UI is published on `127.0.0.1` by default. To use it from a phone on your LAN, set `WEB_BIND` in `.env` to the machine's LAN interface address — read Section 13 first (host firewalls like ufw do **not** filter Docker-published ports; use the `DOCKER-USER` rules there).
 - The `openrgb-config` bind mount persists OpenRGB's device profiles and zone sizes between restarts. The `rgb-state` named volume persists the last-active effect.
 - Timezone comes from `TZ` only. Do not bind-mount `/etc/localtime` (it is host-specific and does not exist on every platform).
 
@@ -1526,9 +1528,11 @@ Free RGB has **no login** and the OpenRGB SDK protocol has **no authentication**
 | 6742 | OpenRGB SDK | Never publish when both containers share a Docker network (`expose`, not `ports`). Elsewhere, listen on loopback, or on the narrowest interface that works (e.g. only reachable from the WSL2 subnet). |
 
 - **Never expose either port to the internet.** No router port-forwards, no UPnP, no public cloud tunnels without authentication in front.
-- To use the UI from a phone on your home network, either:
-  - set `WEB_BIND` to the machine's LAN address **and** restrict the port with a host firewall to your LAN subnet, e.g. `sudo ufw allow from <your-lan-subnet> to any port 7777 proto tcp`; or
-  - keep `WEB_BIND=127.0.0.1` and put a **reverse proxy with authentication** in front (Caddy, nginx, Traefik), e.g. with Caddy:
+- To use the UI from a phone on your home network, pick **one** of the options below for your run mode. (WSL2 has extra forwarding steps — see Section 14, mode C, "Reaching the UI from your LAN".)
+
+#### Option 1 — Reverse proxy with authentication (recommended, any mode)
+
+Keep `WEB_BIND=127.0.0.1` (Docker) or `BIND_HOST=127.0.0.1` (native) and put a **reverse proxy with authentication** in front (Caddy, nginx, Traefik). Only the proxy listens on the LAN. Example with Caddy:
     ```
     rgb.home.arpa {
         tls internal
@@ -1538,6 +1542,41 @@ Free RGB has **no login** and the OpenRGB SDK protocol has **no authentication**
         reverse_proxy 127.0.0.1:7777
     }
     ```
+
+#### Option 2 — Docker mode: bind to the LAN interface (trusted network only)
+
+Set `WEB_BIND=<this-machine-lan-ip>` in `.env` so the UI is published on the LAN interface only (not on every interface, as `0.0.0.0` would be). Do this only on a network where you trust every device.
+
+> **`ufw` / `firewalld` rules do NOT protect Docker-published ports.** Docker inserts its own iptables rules (DNAT in the `nat` table, then the `DOCKER` / `FORWARD` chains) for every published port. That traffic is forwarded to the container and never reaches ufw's `INPUT` rules, so `ufw allow from <subnet> to any port 7777` / `ufw deny 7777` has **no effect** on a port published by Docker. Don't rely on ufw for Docker mode.
+
+If you also want to firewall the published port, use Docker's `DOCKER-USER` chain, which Docker evaluates before its own rules. Because DNAT has already rewritten the destination by the time packets reach `DOCKER-USER`, match the **original** destination port with conntrack rather than `--dport`:
+
+```bash
+# Drop anything to published port 7777 that does not come from your LAN subnet
+sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 7777 --ctdir ORIGINAL \
+  ! -s <your-lan-subnet> -j DROP
+
+# Check it
+sudo iptables -L DOCKER-USER -n -v --line-numbers
+```
+
+- Use `PORT`'s value if you changed it from 7777. Optionally add `-i <lan-interface>` to scope the rule to one interface.
+- Rules added this way are lost on reboot; persist them with your distro's mechanism (e.g. `iptables-persistent` / `netfilter-persistent save`), and add the same rule with `ip6tables` if the host has IPv6 connectivity.
+- (`-p tcp --dport 7777` in `DOCKER-USER` only works if container port and host port are identical, which they are with the default compose file — `--ctorigdstport` is the robust form.)
+
+#### Option 3 — Native mode: bind to the LAN + host firewall
+
+Set `BIND_HOST=<this-machine-lan-ip>` (or `0.0.0.0`) and restrict the port with the host firewall. Here ufw **does** work, because the native server is an ordinary process receiving traffic through `INPUT`:
+
+```bash
+sudo ufw allow from <your-lan-subnet> to any port 7777 proto tcp
+sudo ufw deny 7777/tcp
+```
+
+(On Windows native, use `New-NetFirewallRule -Direction Inbound -Protocol TCP -LocalPort 7777 -RemoteAddress <your-lan-subnet> -Action Allow`.)
+
+#### Always
+
 - Remote access from outside the home should go through a VPN (e.g. WireGuard or a mesh VPN), not an open port.
 
 ### HTTP Hardening (required in `rgb_server.py`)
@@ -1677,9 +1716,11 @@ OpenRGB needs direct SMBus/USB hardware access, which WSL2 does not provide, so 
 
 | Your setup | `OPENRGB_HOST` | OpenRGB SDK host on Windows | Windows firewall |
 |------------|----------------|-----------------------------|------------------|
-| **Docker Desktop** (WSL2 backend) | `host.docker.internal` (the default in `docker-compose.wsl2.yml`) | `127.0.0.1` usually works; use `0.0.0.0` if the connection is refused | Allow inbound TCP 6742 only from the WSL/Docker subnet if you use `0.0.0.0` |
+| **Docker Desktop** (WSL2 backend) | `host.docker.internal` (the default in `docker-compose.wsl2.yml`) | `127.0.0.1` usually works (see note below); use `0.0.0.0` if the connection is refused | Allow inbound TCP 6742 only from the WSL/Docker subnet if you use `0.0.0.0` |
 | **Docker Engine inside WSL2, default NAT networking** | The Windows host IP as seen from WSL: `ip route show default \| awk '{print $3}'` (put it in `.env` as `OPENRGB_HOST=...`; it can change after a reboot) | `0.0.0.0` — the SDK server must listen on all interfaces, because WSL traffic arrives on the WSL virtual adapter, not loopback | **Required:** allow inbound TCP 6742 from the WSL subnet only (below) |
 | **Docker Engine inside WSL2, mirrored networking** (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`, Windows 11 22H2+) | `127.0.0.1`, and add `network_mode: host` to the `rgb-lights` service (remove its `ports:` and `extra_hosts:`; set `BIND_HOST=127.0.0.1` or a LAN address) | `127.0.0.1` | Usually none needed for loopback |
+
+**Why `127.0.0.1` usually works with Docker Desktop:** Docker Desktop proxies container networking through its own Windows-side backend process. Connections a container makes to `host.docker.internal` are relayed by that process, so they reach OpenRGB on Windows as local (loopback) connections; likewise, ports you publish (7777) are opened by Docker Desktop on **Windows** `localhost`. Docker Engine installed inside the WSL2 distro has no such Windows-side proxy, which is why the NAT row needs `0.0.0.0` plus a firewall rule.
 
 Firewall rule for the NAT case (run in an **elevated** PowerShell). Find the WSL subnet from inside WSL with `ip -4 addr show eth0` (e.g. an address ending in `/20`) and use that network, not your whole LAN:
 
@@ -1697,7 +1738,41 @@ docker compose -f docker-compose.wsl2.yml up -d --build
 docker exec rgb-lights python3 effects/rgb_effects.py --info   # should list your device and zones
 ```
 
-**5. Open in browser:** `http://localhost:7777` (WSL2 forwards localhost to Windows).
+**5. Open in browser:** `http://localhost:7777` on the Windows machine (WSL2 / Docker Desktop forward it to Windows localhost).
+
+#### Reaching the UI from your LAN (phones) in WSL2
+
+By default the UI is reachable **only from the Windows machine itself**: WSL2's NAT mode forwards listening ports to Windows `localhost` only, never to the LAN. Read Section 13 first, and prefer the reverse-proxy option (run the proxy on Windows, pointing at `127.0.0.1:7777`) if you can. Otherwise, pick the option matching your setup. All commands run in an **elevated** PowerShell; replace placeholders, never open to "Any".
+
+**Docker Engine in WSL2, default NAT networking — portproxy + firewall rule:**
+
+1. In WSL, publish on all WSL interfaces: set `WEB_BIND=0.0.0.0` in `.env` and restart the container. (This exposes 7777 only on the WSL VM's private virtual network; the LAN still can't reach it until step 2.)
+2. Find the WSL VM's IP from WSL: `hostname -I | awk '{print $1}'`.
+3. Forward a Windows LAN port to it:
+   ```powershell
+   netsh interface portproxy add v4tov4 listenport=7777 listenaddress=0.0.0.0 connectport=7777 connectaddress=<wsl-ip>
+   netsh interface portproxy show v4tov4
+   ```
+   `listenaddress=0.0.0.0` listens on every Windows interface; use the Windows LAN IP instead to narrow it.
+4. Allow it through Windows Firewall from your LAN subnet only:
+   ```powershell
+   New-NetFirewallRule -DisplayName "Free RGB UI (LAN only)" -Direction Inbound `
+     -Protocol TCP -LocalPort 7777 -RemoteAddress <your-lan-subnet> -Action Allow
+   ```
+5. **The WSL IP changes on every reboot / `wsl --shutdown`.** Re-run step 3 with the new IP (delete the old entry with `netsh interface portproxy delete v4tov4 listenport=7777 listenaddress=0.0.0.0`), or script it as a Windows scheduled task at logon.
+
+**Mirrored networking** (`networkingMode=mirrored`): WSL shares Windows' network interfaces, so no portproxy is needed.
+
+1. Use `network_mode: host` for `rgb-lights` (as in the table above) and set `BIND_HOST=<windows-lan-ip>` so the server listens on the LAN interface.
+2. In mirrored mode, inbound traffic to WSL is filtered by the **Hyper-V firewall**, not only the regular Windows Firewall rules. Add a Hyper-V rule for WSL (its VM creator ID is `{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}`), scoped to your LAN subnet:
+   ```powershell
+   New-NetFirewallHyperVRule -Name "FreeRGB-UI-LAN" -DisplayName "Free RGB UI (LAN only)" `
+     -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+     -Protocol TCP -LocalPorts 7777 -RemoteAddresses <your-lan-subnet> -Action Allow
+   ```
+   Check the current defaults with `Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'`. Avoid the blanket `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow` — it opens **every** WSL port to the LAN. Parameter names can vary by Windows build; confirm with `Get-Help New-NetFirewallHyperVRule`.
+
+**Docker Desktop:** set `WEB_BIND=0.0.0.0` (Docker Desktop then listens on Windows' interfaces) and add the same Windows `New-NetFirewallRule` as in NAT step 4, scoped to `<your-lan-subnet>`. Docker Desktop's own firewall prompt, if shown, should be answered "Private networks" only.
 
 **Important:** OpenRGB on Windows must be running with the SDK server started before effects will work. If it isn't, the UI loads but shows OFF and `/api/info` times out.
 
