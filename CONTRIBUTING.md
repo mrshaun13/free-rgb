@@ -1,21 +1,33 @@
 # Contributing to Free RGB
 
-Thanks for your interest in contributing! This project is designed to be AI-generated from a spec, but human contributions are welcome for bug fixes, new effects, and spec improvements.
+Thanks for your interest in contributing! This project is designed to be AI-generated from a spec, but human contributions are welcome for spec improvements, new effects, and bug reports.
+
+**What lives in this repo:** only documentation — [`SPEC.md`](SPEC.md) (the source of truth), `README.md`, this file, `LICENSE`, and `.gitattributes`. The app code, compose files, and Dockerfiles are generated from the spec and are not checked in. Most contributions are therefore changes to `SPEC.md`. If this guide ever disagrees with `SPEC.md`, the spec wins.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/free-rgb.git
+git clone https://github.com/mrshaun13/free-rgb.git
 cd free-rgb
-docker compose up -d
-# Open http://localhost:7777
+# 1. Generate the code: hand SPEC.md + your hardware details to your AI assistant
+#    (see README.md "Quick Start"). This creates docker-compose.yml, the Dockerfiles,
+#    rgb_server.py, effects/rgb_effects.py, and static/index.html.
+# 2. Then run it:
+docker compose up -d --build                              # Linux + Docker
+# docker compose -f docker-compose.wsl2.yml up -d --build # Windows + WSL2
+# OPENRGB_HOST=127.0.0.1 python3 rgb_server.py            # native, no Docker
+# 3. Open http://localhost:7777
 ```
+
+`docker compose up` will fail with "no configuration file provided" until step 1 has generated `docker-compose.yml`.
+
+Don't commit your generated code, `.env`, `openrgb-config/`, or `data/` in PRs to this repo, and never include your own hostnames, IPs, or hardware serials in examples — use generic placeholders like `Example Board X1`.
 
 ## How to Contribute
 
 ### Adding a New Effect
 
-This is the most common contribution. Every effect requires changes in exactly three places:
+This is the most common contribution. An effect touches **three code files** in the generated app, and its definition must be added to **`SPEC.md`** so every future generation includes it. A PR to this repo is the `SPEC.md` change; test it in your generated app first.
 
 **1. Python effect class** (`effects/rgb_effects.py`)
 
@@ -60,7 +72,12 @@ my_effect(t, n) {
 },
 ```
 
-That's it. The grid, cards, preview ring, API, and state management all adapt automatically.
+**4. `SPEC.md`**
+
+- Add a row to the right category table in Section 9 (name, description, notes on how it looks).
+- Update the counts: the category heading, the Section 9 summary table, the "47 visible effects" mentions in Section 6, and the effect count in `README.md`.
+
+The grid, cards, preview ring, API validation, and state management all adapt automatically.
 
 ### Adding a New Flag Effect
 
@@ -70,23 +87,30 @@ Same as above, plus:
 - Add `'my_flag'` to the `FLAG_EFFECTS` Set in JavaScript.
 - Consider using the `_TricolorFlag` base class if it's a three-stripe flag — you only need to set three color constants.
 
+### Adding a New Category
+
+Add the effects with the new category name, plus a CSS accent rule for `[data-cat="New Category"]` in `index.html`, and add the category to the tables in `SPEC.md` Sections 9 and 10.
+
 ### Improving the Spec
 
-If you find something in `SPEC.md` that's unclear, missing, or wrong — fix it. The spec is the most important file in this repo. PRs that improve spec clarity are always welcome.
+If you find something in `SPEC.md` that's unclear, missing, contradictory, or wrong — fix it. The spec is the most important file in this repo. PRs that improve spec clarity are always welcome. When you change a behavior, update every section that mentions it (and README/CONTRIBUTING if they summarize it) so the docs never disagree.
 
-### Bug Fixes
+### Bug Reports
 
-If something doesn't work as described in the spec, file an issue or submit a PR. Include:
+If generated code doesn't work as the spec describes, file an issue or submit a spec PR that makes the requirement clearer. Include:
 - What you expected (reference the spec section).
-- What actually happened.
+- What actually happened, plus your platform/run mode (Linux Docker, Linux native, WSL2, Windows native).
 - Steps to reproduce.
 
-## Code Style
+Please report security problems (e.g. a way to reach files outside `static/`) privately via a GitHub security advisory rather than a public issue.
 
-- **Python:** No external dependencies. Stdlib only. Follow the existing patterns in the codebase.
-- **JavaScript:** Vanilla JS. No frameworks, no npm, no build tools. Everything in one HTML file.
+## Code Style (for generated code and spec examples)
+
+- **Python:** No external dependencies. Stdlib only. Validate all input (see `SPEC.md` §13).
+- **JavaScript:** Vanilla JS. No frameworks, no npm, no build tools. Everything in one HTML file. Use `textContent`, never `innerHTML`, for server-provided strings.
 - **CSS:** Use CSS custom properties (the `--var` system). Never hard-code colors that should be themeable.
 - **Effects:** Keep the Python and JavaScript renderers in sync. Same math, same variable names where possible.
+- **Line endings:** LF everywhere (enforced by `.gitattributes`).
 
 ## Effect Design Guidelines
 
@@ -94,11 +118,11 @@ Good effects:
 - Look distinct from existing effects at a glance.
 - Use the full LED ring (don't leave most LEDs dark unless that's the point).
 - Respond to the `t` (time) parameter smoothly — no jarring jumps.
-- Look good at both speed=0.5x and speed=2x.
+- Look good across the full speed range, 0.25× to 3×.
 - Work with any number of LEDs (don't assume a specific count).
 
 Avoid:
-- Strobing faster than ~4Hz (seizure risk).
+- Strobing faster than ~4 Hz at **any** speed setting, including 3× (seizure risk).
 - Pure white at full brightness for extended periods (LED longevity).
 - Hard-coding LED counts — always use the `num_leds` parameter.
 
@@ -108,9 +132,9 @@ Use [conventional commits](https://www.conventionalcommits.org/):
 
 ```
 feat(effects): add northern lights effect
-fix(server): handle OpenRGB disconnect during effect switch
+fix(spec): clarify zone resize behavior after OpenRGB reconnect
 docs(spec): clarify zone sizing requirements
-chore: update OpenRGB version in Dockerfile
+chore(spec): update OpenRGB version in Dockerfile
 ```
 
 ## Questions?
